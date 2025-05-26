@@ -1,0 +1,13 @@
+# macOS系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 其他常见的需要忽略的文件
+*.log
+node_modules/
+.env
