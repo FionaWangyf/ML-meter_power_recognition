@@ -437,8 +437,13 @@ def test_model(model_path="runs/detect/meter_detection/weights/best.pt", test_im
     results_folder = "detection_results"
     os.makedirs(results_folder, exist_ok=True)
 
+    # 输出表头
+    print("\n检测结果:")
+    print("filename\t\txmin\tymin\txmax\tymax")
+    print("-" * 50)
+
     # 预测并保存结果
-    for img_path in test_images[:50]:  # 只测试前10张
+    for img_path in test_images[:50]:  # 只测试前50张
         print(f"处理: {os.path.basename(img_path)}")
 
         results = model(img_path)
@@ -449,7 +454,20 @@ def test_model(model_path="runs/detect/meter_detection/weights/best.pt", test_im
             result_path = os.path.join(results_folder, f"result_{os.path.basename(img_path)}")
             cv2.imwrite(result_path, result_img)
 
-    print(f"✅ 检测结果保存在: {results_folder}")
+            # 输出检测框位置信息
+            filename = os.path.basename(img_path)
+
+            if result.boxes is not None and len(result.boxes) > 0:
+                # 获取检测框坐标
+                boxes = result.boxes.xyxy.cpu().numpy()  # 转换为numpy数组
+
+                for box in boxes:
+                    xmin, ymin, xmax, ymax = box[:4]
+                    print(f"{filename}\t\t{int(xmin)}\t{int(ymin)}\t{int(xmax)}\t{int(ymax)}")
+            else:
+                print(f"{filename}\t\t未检测到目标")
+
+    print(f"\n✅ 检测结果保存在: {results_folder}")
 
 
 # ===============================================
