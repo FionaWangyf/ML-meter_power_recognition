@@ -6,7 +6,8 @@ import random
 import shutil
 from pathlib import Path
 import yaml
-
+import csv
+from datetime import datetime
 
 # ===============================================
 # 第一部分：图像标注工具
@@ -403,11 +404,11 @@ def train_yolo_model(dataset_folder="dataset", epochs=100, img_size=640, batch_s
 
 
 # ===============================================
-# 第四部分：模型测试
+# 第四部分：模型测试（只取最高置信度结果）
 # ===============================================
 
 def test_model(model_path="runs/detect/meter_detection/weights/best.pt", test_images_folder="processed_images"):
-    """测试训练好的模型"""
+    """测试训练好的模型 - 只保留置信度最高的检测结果"""
 
     try:
         from ultralytics import YOLO
@@ -424,8 +425,10 @@ def test_model(model_path="runs/detect/meter_detection/weights/best.pt", test_im
 
     # 获取测试图片
     test_images = []
-    for ext in ['*.jpg', '*.jpeg', '*.png']:
+    extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
+    for ext in extensions:
         test_images.extend(glob.glob(os.path.join(test_images_folder, ext)))
+        test_images.extend(glob.glob(os.path.join(test_images_folder, ext.upper())))
 
     if not test_images:
         print(f"❌ 在 {test_images_folder} 中没有找到测试图片")
@@ -437,45 +440,281 @@ def test_model(model_path="runs/detect/meter_detection/weights/best.pt", test_im
     results_folder = "detection_results"
     os.makedirs(results_folder, exist_ok=True)
 
-    # 输出表头
-    print("\n检测结果:")
-    print("filename\t\txmin\tymin\txmax\tymax")
-    print("-" * 50)
+    # 准备CSV文件
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = os.path.join(results_folder, f"detection_results_best_{timestamp}.csv")
+
+    # CSV数据存储列表
+    csv_data = []
+
+    # 添加CSV表头
+    csv_headers = ['filename', 'xmin', 'ymin', 'xmax', 'ymax', 'confidence', 'class_name', 'total_detections']
+
+    # 输出表头到控制台
+    print("\n检测结果 (仅显示最高置信度):")
+    print("filename\t\txmin\tymin\txmax\tymax\tconfidence\ttotal_det")
+    print("-" * 80)
+
+    # 统计变量
+    total_images_with_detection = 0
+    total_images_with_multiple_detection = 0
+    processed_count = 0
 
     # 预测并保存结果
-    for img_path in test_images[:50]:  # 只测试前50张
-        print(f"处理: {os.path.basename(img_path)}")
+    for img_path in test_images:  # 测试所有图片
+        filename = os.path.basename(img_path)
+        print(f"处理 ({processed_count + 1}/{len(test_images)}): {filename}")
 
-        results = model(img_path)
+        try:
+            results = model(img_path)
 
-        # 保存结果图片
-        for i, result in enumerate(results):
-            result_img = result.plot()
-            result_path = os.path.join(results_folder, f"result_{os.path.basename(img_path)}")
-            cv2.imwrite(result_path, result_img)
+            # 处理检测结果
+            best_detection = None
+            total_detections_count = 0
 
-            # 输出检测框位置信息
-            filename = os.path.basename(img_path)
+            for i, result in enumerate(results):
+                if result.boxes is not None and len(result.boxes) > 0:
+                    # 获取检测框坐标、置信度和类别
+                    boxes = result.boxes.xyxy.cpu().numpy()  # 坐标
+                    confidences = result.boxes.conf.cpu().numpy()  # 置信度
+                    classes = result.boxes.cls.cpu().numpy()  # 类别
 
-            if result.boxes is not None and len(result.boxes) > 0:
-                # 获取检测框坐标
-                boxes = result.boxes.xyxy.cpu().numpy()  # 转换为numpy数组
+                    total_detections_count = len(boxes)
 
-                for box in boxes:
-                    xmin, ymin, xmax, ymax = box[:4]
-                    print(f"{filename}\t\t{int(xmin)}\t{int(ymin)}\t{int(xmax)}\t{int(ymax)}")
+                    if total_detections_count > 0:
+                        total_images_with_detection += 1
+
+                        if total_detections_count > 1:
+                            total_images_with_multiple_detection += 1
+
+                        # 找到置信度最高的检测结果
+                        best_idx = confidences.argmax()  # 获取置信度最高的索引
+
+                        best_box = boxes[best_idx]
+                        best_confidence = confidences[best_idx]
+                        best_class_id = int(classes[best_idx])
+                        best_class_name = model.names[best_class_id] if best_class_id in model.names else 'unknown'
+
+                        xmin, ymin, xmax, ymax = best_box[:4]
+
+                        best_detection = {
+                            'filename': filename,
+                            'xmin': int(xmin),
+                            'ymin': int(ymin),
+                            'xmax': int(xmax),
+                            'ymax': int(ymax),
+                            'confidence': best_confidence,
+                            'class_name': best_class_name,
+                            'total_detections': total_detections_count
+                        }
+
+                # 保存可视化结果图片（显示最佳检测）
+                if best_detection:
+                    result_img = result.plot()  # 这会显示所有检测结果
+
+                    # 创建只显示最佳检测的图片
+                    original_img = cv2.imread(img_path)
+                    cv2.rectangle(original_img,
+                                  (best_detection['xmin'], best_detection['ymin']),
+                                  (best_detection['xmax'], best_detection['ymax']),
+                                  (0, 255, 0), 3)  # 绿色粗线框
+
+                    # 添加标签
+                    label = f"BEST: {best_detection['class_name']} {best_detection['confidence']:.3f}"
+                    cv2.putText(original_img, label,
+                                (best_detection['xmin'], best_detection['ymin'] - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    # 添加总检测数信息
+                    info_text = f"Total detections: {total_detections_count}"
+                    cv2.putText(original_img, info_text,
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+                    # 保存最佳检测结果图片
+                    result_path = os.path.join(results_folder, f"best_{filename}")
+                    cv2.imwrite(result_path, original_img)
+
+            # 添加到CSV数据和控制台输出
+            if best_detection:
+                csv_data.append([
+                    best_detection['filename'],
+                    best_detection['xmin'],
+                    best_detection['ymin'],
+                    best_detection['xmax'],
+                    best_detection['ymax'],
+                    f"{best_detection['confidence']:.4f}",
+                    best_detection['class_name'],
+                    best_detection['total_detections']
+                ])
+
+                # 输出到控制台
+                print(f"{filename}\t\t{best_detection['xmin']}\t{best_detection['ymin']}\t"
+                      f"{best_detection['xmax']}\t{best_detection['ymax']}\t"
+                      f"{best_detection['confidence']:.4f}\t\t{total_detections_count}")
+
+                # 如果有多个检测，显示提示
+                if total_detections_count > 1:
+                    print(f"  └─ 注意: 共检测到 {total_detections_count} 个目标，已选择置信度最高的")
             else:
+                # 没有检测到目标的情况
+                csv_data.append([
+                    filename,
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    'no_detection',
+                    0
+                ])
                 print(f"{filename}\t\t未检测到目标")
 
-    print(f"\n✅ 检测结果保存在: {results_folder}")
+        except Exception as e:
+            print(f"❌ 处理图片 {filename} 时出错: {e}")
+            # 记录错误到CSV
+            csv_data.append([
+                filename,
+                '',
+                '',
+                '',
+                '',
+                '',
+                'error',
+                0
+            ])
+
+        processed_count += 1
+
+    # 写入CSV文件
+    try:
+        with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(csv_headers)  # 写入表头
+            writer.writerows(csv_data)  # 写入数据
+
+        print(f"\n✅ CSV结果已保存: {csv_filename}")
+    except Exception as e:
+        print(f"❌ 保存CSV文件时出错: {e}")
+
+    # 统计信息
+    print(f"\n📊 检测统计:")
+    print(f"  总图片数: {len(test_images)}")
+    print(f"  处理成功: {processed_count}")
+    print(f"  有检测结果: {total_images_with_detection}")
+    print(
+        f"  检测成功率: {(total_images_with_detection / processed_count) * 100:.2f}%" if processed_count > 0 else "  检测成功率: 0%")
+    print(f"  多目标检测图片: {total_images_with_multiple_detection}")
+    print(
+        f"  多目标率: {(total_images_with_multiple_detection / max(total_images_with_detection, 1)) * 100:.2f}%" if total_images_with_detection > 0 else "  多目标率: 0%")
+    print(f"📁 最佳检测结果图片保存在: {results_folder}/best_*.jpg")
+    print(f"📄 详细结果保存在: {csv_filename}")
 
 
-# ===============================================
-# 主程序
-# ===============================================
+def analyze_detection_results(csv_file_path):
+    """分析检测结果的统计信息"""
 
+    if not os.path.exists(csv_file_path):
+        print(f"❌ CSV文件不存在: {csv_file_path}")
+        return
+
+    print(f"📊 分析检测结果: {csv_file_path}")
+
+    try:
+        with open(csv_file_path, 'r', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            rows = list(reader)
+
+        # 基本统计
+        total_images = len(rows)
+        successful_detections = [row for row in rows if row['class_name'] not in ['no_detection', 'error', '']]
+        no_detection_count = len([row for row in rows if row['class_name'] == 'no_detection'])
+        error_count = len([row for row in rows if row['class_name'] == 'error'])
+
+        # 多检测统计
+        multi_detection_images = [row for row in rows if row['total_detections'] and int(row['total_detections']) > 1]
+
+        # 置信度统计
+        confidences = []
+        for row in successful_detections:
+            if row['confidence']:
+                try:
+                    confidences.append(float(row['confidence']))
+                except ValueError:
+                    pass
+
+        print(f"\n📈 检测结果统计:")
+        print(f"  总图片数: {total_images}")
+        print(f"  成功检测数: {len(successful_detections)}")
+        print(f"  未检测到: {no_detection_count}")
+        print(f"  处理错误: {error_count}")
+        print(
+            f"  检测成功率: {(len(successful_detections) / total_images) * 100:.2f}%" if total_images > 0 else "  检测成功率: 0%")
+
+        # 多检测分析
+        print(f"\n🔍 多检测分析:")
+        print(f"  有多个检测的图片: {len(multi_detection_images)}")
+        print(
+            f"  多检测率: {(len(multi_detection_images) / len(successful_detections)) * 100:.2f}%" if successful_detections else "  多检测率: 0%")
+
+        if multi_detection_images:
+            detection_counts = [int(row['total_detections']) for row in multi_detection_images]
+            print(f"  最多检测数: {max(detection_counts)}")
+            print(f"  平均检测数: {sum(detection_counts) / len(detection_counts):.2f}")
+
+        # 置信度分析
+        if confidences:
+            print(f"\n🎯 置信度分析:")
+            print(f"  平均置信度: {sum(confidences) / len(confidences):.4f}")
+            print(f"  最高置信度: {max(confidences):.4f}")
+            print(f"  最低置信度: {min(confidences):.4f}")
+
+            # 置信度分布
+            high_conf = len([c for c in confidences if c >= 0.8])
+            medium_conf = len([c for c in confidences if 0.5 <= c < 0.8])
+            low_conf = len([c for c in confidences if c < 0.5])
+
+            print(f"\n📊 置信度分布:")
+            print(f"  高置信度 (≥0.8): {high_conf} ({high_conf / len(confidences) * 100:.1f}%)")
+            print(f"  中置信度 (0.5-0.8): {medium_conf} ({medium_conf / len(confidences) * 100:.1f}%)")
+            print(f"  低置信度 (<0.5): {low_conf} ({low_conf / len(confidences) * 100:.1f}%)")
+
+    except Exception as e:
+        print(f"❌ 分析CSV文件时出错: {e}")
+
+
+def show_multi_detection_samples(csv_file_path, top_n=10):
+    """显示多检测样本"""
+
+    if not os.path.exists(csv_file_path):
+        print(f"❌ CSV文件不存在: {csv_file_path}")
+        return
+
+    try:
+        with open(csv_file_path, 'r', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            rows = list(reader)
+
+        # 找出多检测的图片，按检测数量排序
+        multi_detection_rows = [row for row in rows if row['total_detections'] and int(row['total_detections']) > 1]
+        multi_detection_rows.sort(key=lambda x: int(x['total_detections']), reverse=True)
+
+        print(f"\n🔍 多检测样本 (前{min(top_n, len(multi_detection_rows))}个):")
+        print("-" * 100)
+
+        for i, row in enumerate(multi_detection_rows[:top_n]):
+            print(f"{i + 1:2d}. {row['filename']} - 检测数: {row['total_detections']}, "
+                  f"最佳置信度: {row['confidence']}, "
+                  f"坐标: ({row['xmin']},{row['ymin']})-({row['xmax']},{row['ymax']})")
+
+        if multi_detection_rows:
+            print(f"\n💡 建议查看这些图片的 best_*.jpg 结果文件，确认检测质量")
+
+    except Exception as e:
+        print(f"❌ 显示多检测样本时出错: {e}")
+
+# 更新主程序中的选择项
 def main():
-    """主程序入口"""
+    """主程序入口 - 更新版本"""
 
     print("=" * 60)
     print("🔬 电表读数区域检测完整流程")
@@ -493,11 +732,12 @@ def main():
         print("1. 📝 标注图片 (创建训练标签)")
         print("2. 📁 准备数据集 (整理为YOLO格式)")
         print("3. 🚀 训练模型")
-        print("4. 🔍 测试模型")
-        print("5. 📦 安装依赖")
+        print("4. 🔍 测试模型 (生成CSV结果)")
+        print("5. 📊 分析检测结果")
+        print("6. 📦 安装依赖")
         print("0. 🚪 退出")
 
-        choice = input("\n请选择 (0-5): ").strip()
+        choice = input("\n请选择 (0-6): ").strip()
 
         if choice == '1':
             print("\n📝 启动图片标注工具...")
@@ -527,6 +767,28 @@ def main():
             test_model(model_path)
 
         elif choice == '5':
+            print("\n📊 分析检测结果...")
+            csv_files = glob.glob("detection_results/detection_results_*.csv")
+            if csv_files:
+                print("找到的CSV文件:")
+                for i, file in enumerate(csv_files, 1):
+                    print(f"  {i}. {os.path.basename(file)}")
+
+                choice_csv = input(f"选择文件 (1-{len(csv_files)}) 或输入完整路径: ").strip()
+
+                if choice_csv.isdigit() and 1 <= int(choice_csv) <= len(csv_files):
+                    csv_file = csv_files[int(choice_csv) - 1]
+                else:
+                    csv_file = choice_csv
+
+                analyze_detection_results(csv_file)
+            else:
+                print("❌ 没有找到检测结果CSV文件")
+                csv_file = input("请输入CSV文件路径: ").strip()
+                if csv_file:
+                    analyze_detection_results(csv_file)
+
+        elif choice == '6':
             install_requirements()
 
         elif choice == '0':
